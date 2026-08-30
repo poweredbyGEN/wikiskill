@@ -6,8 +6,8 @@ import json
 import os
 import pathlib
 import re
-import signal
 import shutil
+import signal
 import stat
 import subprocess
 import tarfile
