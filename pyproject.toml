@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wikiskill"
+version = "0.1.0"
+description = "Group-scoped persistent knowledge and validation-gated skill evolution for coding agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "WikiSkill contributors" }]
+dependencies = []
+
+[project.scripts]
+wikiskill = "wikiskill.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

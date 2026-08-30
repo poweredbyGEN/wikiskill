@@ -1,0 +1,2 @@
+class WikiSkillError(RuntimeError):
+    pass
