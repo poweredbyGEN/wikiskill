@@ -58,8 +58,10 @@ MAX_MANIFEST_BYTES = 1_000_000
 
 
 def _strings(value: object, label: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value or not all(
-        isinstance(item, str) and item for item in value
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
     ):
         raise WikiSkillError(f"{label} must be a non-empty string array")
     return tuple(value)
@@ -422,9 +424,7 @@ def _run_case(
                 "changed": changed[:100],
             }
         unsupported = [
-            path
-            for path in changed
-            if path in current and current[path][0] != "file"
+            path for path in changed if path in current and current[path][0] != "file"
         ]
         if unsupported:
             return {
@@ -479,7 +479,11 @@ def proof(
     if not skills.is_dir():
         raise WikiSkillError(f"skills directory does not exist: {skills}")
     root = pathlib.Path(
-        _git(pathlib.Path(project_path).expanduser().resolve(), "rev-parse", "--show-toplevel")
+        _git(
+            pathlib.Path(project_path).expanduser().resolve(),
+            "rev-parse",
+            "--show-toplevel",
+        )
     ).resolve()
     results = [
         _run_case(root, skills, manifest, case, repetition)

@@ -193,9 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "proof":
             skills = args.skills or os.environ.get("WIKISKILL_SKILLS_DIR", "")
             if not skills:
-                raise WikiSkillError(
-                    "proof needs --skills or WIKISKILL_SKILLS_DIR"
-                )
+                raise WikiSkillError("proof needs --skills or WIKISKILL_SKILLS_DIR")
             result = proof(args.manifest, skills, args.project)
             report = os.environ.get("WIKISKILL_VALIDATION_REPORT", "")
             if report:

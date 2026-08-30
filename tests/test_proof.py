@@ -86,7 +86,9 @@ def test_candidate_skill_must_produce_verifiable_artifact(tmp_path):
     assert result["score"] == 1
     assert result["passed"] == result["total"] == 1
     assert len(result["skills_sha256"]) == 64
-    assert result["manifest_sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    assert (
+        result["manifest_sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    )
     assert result["cases"][0]["outcome"] == "passed"
     assert result["cases"][0]["changed"] == ["answer.txt"]
     assert len(result["cases"][0]["ref"]) == 40
@@ -230,9 +232,11 @@ def test_case_cannot_read_newer_source_history(tmp_path):
         "-m",
         "future solution",
     )
-    manifest.write_text(manifest.read_text().replace(
-        'name = "artifact"', f'name = "artifact"\nref = "{bug_sha}"'
-    ))
+    manifest.write_text(
+        manifest.read_text().replace(
+            'name = "artifact"', f'name = "artifact"\nref = "{bug_sha}"'
+        )
+    )
     agent.write_text(
         "import pathlib,subprocess,sys\n"
         "sys.stdin.read()\n"
