@@ -58,6 +58,70 @@ The validator receives `WIKISKILL_SKILLS_DIR` and must print a final JSON line:
 
 A candidate must strictly improve the aggregate score across every registered repository in its group. Without a validator, proposals remain drafts and are never injected into coding sessions.
 
+## Built-in proof validator
+
+`wikiskill proof` runs held-out coding tasks in exact, history-free Git fixtures, injects only the
+candidate skills, and grades the resulting files with deterministic commands. Every case
+has an explicit implementation-path allowlist. Verification runs in a second pristine
+fixture containing only those allowlisted changes, so the evaluated agent never controls
+the tests or the grading workspace.
+
+Create `.wikiskill-proof.toml`:
+
+```toml
+version = 1
+ref = "proof-fixtures/parser-bug"
+repetitions = 2
+timeout_seconds = 600
+
+[agent]
+command = ["codex", "exec", "--sandbox", "workspace-write", "-"]
+# pass_env = ["EXPLICIT_CREDENTIAL_IF_REQUIRED"]
+
+[[cases]]
+name = "preserves quoted separators"
+prompt = "Fix the parser so quoted separators do not split a field."
+allow = ["src/**"]
+verify = [["python3", "-m", "pytest", "tests/test_parser.py", "-q"]]
+```
+
+The ref must identify a reproducible task fixture, preferably an immutable commit SHA
+containing the bug. Commands are argument arrays, not shell strings. Verifier commands are
+not included in the task prompt; keep the manifest outside the fixture when the checks
+must be hidden. The score is the fraction of passing cases and repetitions.
+
+The manifest is trusted benchmark configuration. Keep verifier files and their fixtures
+outside `allow`. WikiSkill isolates Git history and per-run scratch, but it does not replace
+an OS sandbox: `agent.command` must confine writes to the workspace (the Codex example does).
+
+Run it directly:
+
+```bash
+wikiskill proof .wikiskill-proof.toml --skills /path/to/skills
+```
+
+Or use it as the group validator:
+
+```bash
+wikiskill register /work/api \
+  --group backend \
+  --deja-project api \
+  --model MODEL_ID \
+  --validator 'wikiskill proof .wikiskill-proof.toml'
+```
+
+Use task tests, exact-match checks, schema validation, or artifact comparison. Do not use
+an LLM judge as the only verifier. Keep the configured agent model and command fixed so
+the current and candidate skill sets are compared under the same harness.
+The agent receives a minimal environment by default; `agent.pass_env` is the explicit
+escape hatch when a harness cannot use its normal CLI login. Any listed secret is visible
+to the evaluated agent, so prefer CLI/OAuth authentication.
+
+When WikiSkill invokes the validator, it also sets `WIKISKILL_VALIDATION_REPORT`.
+`wikiskill proof` writes the complete private report there: the exact Git SHA, manifest and
+skill-set digests, changed paths, and outcome for every case. The score is the gate; this
+report is the evidence behind it.
+
 ## Optional Graphify access
 
 Graphify describes current code relationships; WikiSkill compiles reusable procedures. Configure one read-only Graphify MCP per repository in Codex, then bind it to the matching group namespace:

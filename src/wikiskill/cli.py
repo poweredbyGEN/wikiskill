@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from . import __version__
@@ -17,6 +18,7 @@ from .core import (
     run,
     state_dir,
 )
+from .proof import proof, write_report
 
 
 def parser() -> argparse.ArgumentParser:
@@ -63,6 +65,12 @@ def parser() -> argparse.ArgumentParser:
         "hook-context", help="fail-open session-start context for agent hooks"
     )
     hook.add_argument("path", nargs="?", default=".")
+    validate = commands.add_parser(
+        "proof", help="score held-out agent tasks with deterministic verifiers"
+    )
+    validate.add_argument("manifest", nargs="?", default=".wikiskill-proof.toml")
+    validate.add_argument("--skills", default="")
+    validate.add_argument("--project", default=".")
     return root
 
 
@@ -182,6 +190,20 @@ def main(argv: list[str] | None = None) -> int:
                 json.JSONDecodeError,
             ):
                 pass
+        elif args.command == "proof":
+            skills = args.skills or os.environ.get("WIKISKILL_SKILLS_DIR", "")
+            if not skills:
+                raise WikiSkillError("proof needs --skills or WIKISKILL_SKILLS_DIR")
+            result = proof(args.manifest, skills, args.project)
+            report = os.environ.get("WIKISKILL_VALIDATION_REPORT", "")
+            if report:
+                write_report(report, result)
+            for case in result["cases"]:
+                print(
+                    f"proof {case['name']}#{case['run']}: {case['outcome']}",
+                    file=sys.stderr,
+                )
+            print(json.dumps(result, sort_keys=True))
         return 0
     except (WikiSkillError, OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"wikiskill: {exc}", file=sys.stderr)

@@ -738,6 +738,9 @@ def build_candidate(
 def _score(command: str, project: Project, skills: pathlib.Path) -> float:
     env = os.environ.copy()
     env["WIKISKILL_SKILLS_DIR"] = str(skills)
+    env["WIKISKILL_VALIDATION_REPORT"] = str(
+        skills.parent / "proof-reports" / f"{quote(project.project_id, safe='')}.json"
+    )
     with (
         tempfile.TemporaryFile() as stdout_file,
         tempfile.TemporaryFile() as stderr_file,
