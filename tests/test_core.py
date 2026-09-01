@@ -14,6 +14,7 @@ from wikiskill.core import (
     _group_lock,
     _group_score,
     _pending_sessions,
+    _processed_key,
     _record_sessions,
     _score,
     apply_maintenance,
@@ -208,8 +209,7 @@ def test_nightly_reads_deja_once_and_evolves_each_group_once(monkeypatch):
     )
     monkeypatch.setattr(
         "wikiskill.cli.evolve_group",
-        lambda group, _listing, _quiet: events.append(("group", group))
-        or {},
+        lambda group, _listing, _quiet: events.append(("group", group)) or {},
     )
 
     assert main(["nightly"]) == 0
@@ -322,6 +322,11 @@ def test_group_evolution_samples_across_project_folders_once(tmp_path, monkeypat
             "gave_up": True,
         }
     )
+    for item in sessions:
+        if item["project"] == "widget":
+            item["path"] = str(first / "nested")
+        elif item["project"] == "infra":
+            item["path"] = str(second / "nested")
     details = {item["id"]: item for item in sessions}
     shown = []
 
@@ -363,9 +368,9 @@ def test_group_evolution_samples_across_project_folders_once(tmp_path, monkeypat
     }
     assert len(calls) == 2
     assert len(shown) == 8
-    manifest = json.loads(
-        (state_dir("default") / "raw/manifest.json").read_text()
-    )["sessions"]
+    manifest = json.loads((state_dir("default") / "raw/manifest.json").read_text())[
+        "sessions"
+    ]
     assert {item["project"] for item in manifest.values()} == {"widget", "infra"}
     assert "unrelated" not in manifest
 
@@ -570,7 +575,9 @@ def test_raw_snapshots_are_redacted_and_integrity_checked(tmp_path, monkeypatch)
         ],
     )
     manifest = json.loads((project_state / "raw/manifest.json").read_text())
-    snapshot = project_state / "raw" / manifest["sessions"]["one"]["snapshot"]
+    snapshot = (
+        project_state / "raw" / next(iter(manifest["sessions"].values()))["snapshot"]
+    )
     assert "secret" not in snapshot.read_text()
     snapshot.write_text('{"id":"tampered"}')
     with pytest.raises(WikiSkillError, match="hash mismatch"):
@@ -582,15 +589,17 @@ def test_resumed_session_creates_new_pending_evidence(tmp_path, monkeypatch):
     project = register(str(root), deja_project="widget")
     first = {
         "id": "resumed",
+        "harness": "codex",
         "project": "widget",
+        "path": str(root / "nested"),
         "updated": "2026-01-01T00:00:00+00:00",
         "messages": [{"text": "first"}],
     }
     _record_sessions(project, [first])
     manifest_path = state_dir("default") / "raw/manifest.json"
-    first_digest = json.loads(manifest_path.read_text())["sessions"]["resumed"][
-        "sha256"
-    ]
+    first_digest = next(
+        iter(json.loads(manifest_path.read_text())["sessions"].values())
+    )["sha256"]
     second = {
         **first,
         "updated": "2026-01-02T00:00:00+00:00",
@@ -599,7 +608,14 @@ def test_resumed_session_creates_new_pending_evidence(tmp_path, monkeypatch):
 
     def deja(args, timeout=180):
         if args[0] == "last":
-            return {"sessions": [{"id": "resumed", "updated": second["updated"]}]}
+            return {
+                "sessions": [
+                    {
+                        key: second[key]
+                        for key in ("id", "harness", "project", "path", "updated")
+                    }
+                ]
+            }
         return {"session": second}
 
     monkeypatch.setattr("wikiskill.core._deja_json", deja)
@@ -607,7 +623,7 @@ def test_resumed_session_creates_new_pending_evidence(tmp_path, monkeypatch):
     assert refreshed == [second]
     _record_sessions(project, refreshed)
     manifest = json.loads(manifest_path.read_text())
-    assert manifest["sessions"]["resumed"]["sha256"] != first_digest
+    assert next(iter(manifest["sessions"].values()))["sha256"] != first_digest
     assert [
         session["messages"][-1]["text"]
         for session in _pending_sessions(project, state_dir("default"), {first_digest})
@@ -878,7 +894,13 @@ def test_recent_sessions_reads_every_unseen_session_in_window(tmp_path, monkeypa
     root = repo(tmp_path)
     project = register(str(root), deja_project="widget")
     listed = [
-        {"id": f"session-{index}", "updated": "2026-01-01T00:00:00+00:00"}
+        {
+            "id": f"session-{index}",
+            "harness": "codex",
+            "project": "widget",
+            "path": str(root / "nested"),
+            "updated": "2026-01-01T00:00:00+00:00",
+        }
         for index in range(150)
     ]
     calls = []
@@ -891,7 +913,9 @@ def test_recent_sessions_reads_every_unseen_session_in_window(tmp_path, monkeypa
         return {
             "session": {
                 "id": session_id,
+                "harness": "codex",
                 "project": "widget",
+                "path": str(root / "nested"),
                 "updated": "2026-01-01T00:00:00+00:00",
             }
         }
@@ -907,17 +931,133 @@ def test_recent_sessions_skips_already_ingested_details(tmp_path, monkeypatch):
     project = register(str(root), deja_project="widget")
     _record_sessions(
         project,
-        [{"id": "known", "updated": "2026-01-01T00:00:00+00:00"}],
+        [
+            {
+                "id": "known",
+                "harness": "codex",
+                "project": "widget",
+                "path": str(root / "nested"),
+                "updated": "2026-01-01T00:00:00+00:00",
+            }
+        ],
     )
     calls = []
 
     def deja(args, timeout=180):
         calls.append(args)
-        return {"sessions": [{"id": "known", "updated": "2026-01-01T00:00:00+00:00"}]}
+        return {
+            "sessions": [
+                {
+                    "id": "known",
+                    "harness": "codex",
+                    "project": "widget",
+                    "path": str(root / "nested"),
+                    "updated": "2026-01-01T00:00:00+00:00",
+                }
+            ]
+        }
 
     monkeypatch.setattr("wikiskill.core._deja_json", deja)
     assert recent_sessions(project, "365d", quiet_minutes=0) == []
     assert len(calls) == 1
+
+
+def test_recent_session_rejects_same_label_from_another_repository(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "registered"
+    other = tmp_path / "other"
+    root.mkdir()
+    other.mkdir()
+    repo(root)
+    repo(other)
+    git(
+        other,
+        "remote",
+        "set-url",
+        "origin",
+        "https://code.example/other/widget.git",
+    )
+    project = register(str(root), deja_project="widget")
+    item = {
+        "id": "crossed",
+        "harness": "codex",
+        "project": "widget",
+        "path": str(other / "nested"),
+        "updated": "2026-01-01T00:00:00+00:00",
+    }
+
+    def deja(args, timeout=180):
+        return {"sessions": [item]} if args[0] == "last" else {"session": item}
+
+    monkeypatch.setattr("wikiskill.core._deja_json", deja)
+    assert recent_sessions(project, "365d", quiet_minutes=0) == []
+
+
+def test_recent_session_rejects_detail_resumed_after_listing(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    project = register(str(root), deja_project="widget")
+    item = {
+        "id": "resumed",
+        "harness": "codex",
+        "project": "widget",
+        "path": str(root / "nested"),
+        "updated": "2026-01-01T00:00:00+00:00",
+    }
+    detail = {**item, "updated": "2026-01-02T00:00:00+00:00"}
+
+    def deja(args, timeout=180):
+        return {"sessions": [item]} if args[0] == "last" else {"session": detail}
+
+    monkeypatch.setattr("wikiskill.core._deja_json", deja)
+    assert recent_sessions(project, "365d", quiet_minutes=0) == []
+
+
+def test_same_session_id_from_two_harnesses_stays_distinct(tmp_path):
+    root = repo(tmp_path)
+    project = register(str(root), deja_project="widget")
+    base = {
+        "id": "shared-id",
+        "project": "widget",
+        "path": str(root / "nested"),
+        "updated": "2026-01-01T00:00:00+00:00",
+    }
+    codex = {**base, "harness": "codex"}
+    claude = {**base, "harness": "claude"}
+    project_state = state_dir("default")
+
+    _record_sessions(project, [codex, claude])
+
+    manifest = json.loads((project_state / "raw/manifest.json").read_text())
+    assert len(manifest["sessions"]) == 2
+    assert {
+        item["harness"] for item in _pending_sessions(project, project_state, set())
+    } == {"codex", "claude"}
+    assert [
+        item["harness"]
+        for item in _pending_sessions(project, project_state, {_processed_key(codex)})
+    ] == ["claude"]
+
+
+def test_id_only_manifest_and_digest_only_processed_state_remain_readable(tmp_path):
+    root = repo(tmp_path)
+    project = register(str(root), deja_project="widget")
+    session = {
+        "id": "legacy",
+        "harness": "codex",
+        "project": "widget",
+        "path": str(root / "nested"),
+        "updated": "2026-01-01T00:00:00+00:00",
+    }
+    project_state = state_dir("default")
+    _record_sessions(project, [session])
+    manifest_path = project_state / "raw/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    metadata = next(iter(manifest["sessions"].values()))
+    manifest["sessions"] = {"legacy": metadata}
+    manifest_path.write_text(json.dumps(manifest))
+
+    assert _pending_sessions(project, project_state, {metadata["sha256"]}) == []
 
 
 def test_codex_runs_without_source_checkout_or_shell_tools(tmp_path, monkeypatch):

@@ -400,9 +400,73 @@ def _deja_json(args: list[str], timeout: int = 180) -> dict:
 
 
 def recent_listing(since: str) -> dict:
-    return _deja_json(
-        ["last", str(2**31 - 1), "--since", since, "--json"], timeout=600
+    return _deja_json(["last", str(2**31 - 1), "--since", since, "--json"], timeout=600)
+
+
+def _evidence_key(value: dict) -> str:
+    return json.dumps(
+        [value.get("harness", ""), value.get("id", ""), value.get("path", "")],
+        separators=(",", ":"),
     )
+
+
+def _known_session(known: dict, value: dict) -> dict:
+    current = known.get(_evidence_key(value))
+    if current is not None:
+        return current
+    legacy = known.get(value.get("id", ""), {})
+    if not legacy:
+        return {}
+    expected = {
+        "harness": value.get("harness", ""),
+        "project": value.get("project", ""),
+        "source_path": value.get("path", ""),
+    }
+    return (
+        legacy
+        if all(legacy.get(key, "") == item for key, item in expected.items())
+        else {}
+    )
+
+
+def _processed_key(session: dict) -> str:
+    return json.dumps(
+        [_evidence_key(session), _session_digest(session)], separators=(",", ":")
+    )
+
+
+def _manifest_evidence_key(key: str, metadata: dict) -> str:
+    try:
+        parts = json.loads(key)
+    except json.JSONDecodeError:
+        parts = None
+    if isinstance(parts, list) and len(parts) == 3:
+        return key
+    return _evidence_key(
+        {
+            "harness": metadata.get("harness", ""),
+            "id": key,
+            "path": metadata.get("source_path", ""),
+        }
+    )
+
+
+def _detail_matches(
+    project: Project, item: dict, detail: dict, cutoff: dt.datetime
+) -> bool:
+    for key in ("id", "harness", "project", "path", "updated"):
+        if not isinstance(item.get(key), str) or detail.get(key) != item[key]:
+            return False
+    if _parse_time(detail["updated"]) > cutoff:
+        return False
+    path = pathlib.Path(detail["path"])
+    if not path.is_absolute():
+        return False
+    try:
+        root = stable_root(canonical_root(path))
+        return identity(root) == project.project_id
+    except (WikiSkillError, OSError, ValueError):
+        return False
 
 
 def _recent_details(
@@ -414,7 +478,7 @@ def _recent_details(
     cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=quiet_minutes)
     sessions: list[dict] = []
     for item in items:
-        previous = known.get(item.get("id"), {})
+        previous = _known_session(known, item)
         if (
             previous.get("updated")
             and item.get("updated")
@@ -428,11 +492,7 @@ def _recent_details(
             command += ["--harness", item["harness"]]
         command += ["--json", "--limit", "1000000"]
         detail = _deja_json(command).get("session", {})
-        if detail:
-            if detail.get("project") != project.deja_project:
-                raise WikiSkillError(
-                    f"Deja returned project {detail.get('project')!r} for scope {project.deja_project!r}"
-                )
+        if detail and _detail_matches(project, item, detail, cutoff):
             sessions.append(detail)
     return sessions
 
@@ -455,9 +515,7 @@ def recent_sessions(
             "--json",
         ]
     )
-    return _recent_details(
-        project, listing.get("sessions", []), known, quiet_minutes
-    )
+    return _recent_details(project, listing.get("sessions", []), known, quiet_minutes)
 
 
 def _record_sessions(project: Project, sessions: list[dict]) -> list[dict]:
@@ -471,12 +529,16 @@ def _record_sessions(project: Project, sessions: list[dict]) -> list[dict]:
         if not session_id:
             continue
         clean = _sanitize(session)
+        evidence_key = _evidence_key(clean)
         digest = _session_digest(clean)
-        if known.get(session_id, {}).get("sha256") == digest:
+        previous = _known_session(known, clean)
+        if previous.get("sha256") == digest:
             continue
         snapshot = f"sessions/{digest}.json"
         _atomic_json(root / "raw" / snapshot, clean)
-        known[session_id] = {
+        if session_id in known and previous is known[session_id]:
+            known.pop(session_id)
+        known[evidence_key] = {
             "gave_up": bool(clean.get("gave_up")),
             "harness": clean.get("harness", ""),
             "project": project.deja_project,
@@ -503,20 +565,25 @@ def _pending_sessions(
 ) -> list[dict]:
     manifest = json.loads((root / "raw/manifest.json").read_text(encoding="utf-8"))
     pending = [
-        (session_id, metadata)
-        for session_id, metadata in manifest.get("sessions", {}).items()
+        (evidence_key, metadata)
+        for evidence_key, metadata in manifest.get("sessions", {}).items()
         if metadata["sha256"] not in processed
+        and json.dumps(
+            [_manifest_evidence_key(evidence_key, metadata), metadata["sha256"]],
+            separators=(",", ":"),
+        )
+        not in processed
         and (project is None or metadata.get("project") == project.deja_project)
     ]
     pending.sort(key=lambda item: item[1].get("updated", ""), reverse=True)
     failures = [item for item in pending if item[1].get("gave_up")][:5]
     others = [item for item in pending if not item[1].get("gave_up")][:3]
     sessions: list[dict] = []
-    for session_id, metadata in failures + others:
+    for evidence_key, metadata in failures + others:
         snapshot = root / "raw" / metadata["snapshot"]
         detail = json.loads(snapshot.read_text(encoding="utf-8"))
         if _session_digest(detail) != metadata["sha256"]:
-            raise WikiSkillError(f"raw evidence hash mismatch: {session_id}")
+            raise WikiSkillError(f"raw evidence hash mismatch: {evidence_key}")
         sessions.append(detail)
     return sessions
 
@@ -951,7 +1018,7 @@ def _evolve_sessions_locked(
     result = gate(project, root, proposal, candidate)
     state = json.loads(state_path.read_text(encoding="utf-8"))
     processed = set(state.get("processed_sessions", []))
-    processed.update(_session_digest(session) for session in sessions)
+    processed.update(_processed_key(session) for session in sessions)
     state["processed_sessions"] = sorted(processed)
     maintained = set(state.get("maintained_sessions", []))
     maintained.difference_update(_session_digest(session) for session in sessions)
@@ -1025,9 +1092,7 @@ def evolve_group(
                     f"registered root identity changed: expected {project.project_id}, found {actual_id}"
                 )
 
-        manifest = json.loads(
-            (root / "raw/manifest.json").read_text(encoding="utf-8")
-        )
+        manifest = json.loads((root / "raw/manifest.json").read_text(encoding="utf-8"))
         known = manifest.get("sessions", {})
         cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=quiet_minutes)
         eligible = [
@@ -1037,8 +1102,8 @@ def evolve_group(
             and item.get("id")
             and item.get("updated")
             and not (
-                known.get(item["id"], {}).get("updated")
-                and _parse_time(known[item["id"]]["updated"])
+                _known_session(known, item).get("updated")
+                and _parse_time(_known_session(known, item)["updated"])
                 >= _parse_time(item["updated"])
             )
             and _parse_time(item["updated"]) <= cutoff
@@ -1048,9 +1113,7 @@ def evolve_group(
         selected += [item for item in eligible if not item.get("gave_up")][:3]
         for project in members:
             items = [
-                item
-                for item in selected
-                if item.get("project") == project.deja_project
+                item for item in selected if item.get("project") == project.deja_project
             ]
             if items:
                 _record_sessions(

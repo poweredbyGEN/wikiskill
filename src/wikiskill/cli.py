@@ -158,9 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                     ValueError,
                     json.JSONDecodeError,
                 ) as exc:
-                    print(
-                        json.dumps({"group": group_id, "error": str(exc)})
-                    )
+                    print(json.dumps({"group": group_id, "error": str(exc)}))
                     failed = True
             return 1 if failed else 0
         elif args.command == "status":
