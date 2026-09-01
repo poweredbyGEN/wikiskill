@@ -25,6 +25,7 @@ from wikiskill.core import (
     context,
     data_home,
     evolve,
+    evolve_group,
     gate,
     identity,
     ingest,
@@ -187,7 +188,7 @@ def test_redacts_modern_github_and_temporary_aws_tokens():
     assert value == "<redacted> <redacted>"
 
 
-def test_nightly_warms_deja_once_before_project_queries(monkeypatch):
+def test_nightly_reads_deja_once_and_evolves_each_group_once(monkeypatch):
     events = []
     projects = {
         "code.example/acme/one": Project(
@@ -196,23 +197,42 @@ def test_nightly_warms_deja_once_before_project_queries(monkeypatch):
         "code.example/acme/two": Project(
             "code.example/acme/two", "backend", "/two", "two"
         ),
+        "code.example/acme/three": Project(
+            "code.example/acme/three", "frontend", "/three", "three"
+        ),
     }
-    monkeypatch.setattr(
-        "wikiskill.cli.run",
-        lambda args, timeout: events.append((args, timeout)),
-    )
     monkeypatch.setattr("wikiskill.cli.load_registry", lambda: projects)
     monkeypatch.setattr(
-        "wikiskill.cli.evolve",
-        lambda project, _since, _quiet: events.append(project.project_id) or {},
+        "wikiskill.cli.recent_listing",
+        lambda since: events.append(("listing", since)) or {"sessions": []},
+    )
+    monkeypatch.setattr(
+        "wikiskill.cli.evolve_group",
+        lambda group, _listing, _quiet: events.append(("group", group))
+        or {},
     )
 
     assert main(["nightly"]) == 0
     assert events == [
-        (["deja", "warmup"], 1800),
-        "code.example/acme/one",
-        "code.example/acme/two",
+        ("listing", "36h"),
+        ("group", "backend"),
+        ("group", "frontend"),
     ]
+
+
+def test_nightly_warmup_is_explicit(monkeypatch):
+    events = []
+    monkeypatch.setattr("wikiskill.cli.load_registry", lambda: {})
+    monkeypatch.setattr(
+        "wikiskill.cli.run", lambda args, timeout: events.append((args, timeout))
+    )
+    monkeypatch.setattr(
+        "wikiskill.cli.recent_listing",
+        lambda since: events.append(("listing", since)) or {"sessions": []},
+    )
+
+    assert main(["nightly", "--warmup"]) == 0
+    assert events == [(["deja", "warmup"], 1800), ("listing", "36h")]
 
 
 def test_command_errors_redact_credentials():
@@ -256,6 +276,98 @@ def test_repositories_in_one_group_share_state(tmp_path, monkeypatch):
     second_project = register(str(second), deja_project="infra")
     assert first_project.group_id == second_project.group_id == "default"
     assert initialize(first_project) == initialize(second_project)
+
+
+def test_group_evolution_samples_across_project_folders_once(tmp_path, monkeypatch):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    repo(first)
+    repo(second)
+    git(
+        second,
+        "remote",
+        "set-url",
+        "origin",
+        "https://code.example/tools/infra.git",
+    )
+    register(str(first), deja_project="widget")
+    register(str(second), deja_project="infra")
+    sessions = [
+        {
+            "id": f"failure-{index}",
+            "project": "widget" if index % 2 else "infra",
+            "updated": f"2026-01-{index + 1:02d}T00:00:00+00:00",
+            "gave_up": True,
+            "harness": "codex",
+        }
+        for index in range(6)
+    ]
+    sessions += [
+        {
+            "id": f"other-{index}",
+            "project": "widget" if index % 2 else "infra",
+            "updated": f"2025-12-{index + 1:02d}T00:00:00+00:00",
+            "gave_up": False,
+            "harness": "claude",
+        }
+        for index in range(4)
+    ]
+    sessions.append(
+        {
+            "id": "unrelated",
+            "project": "other",
+            "updated": "2026-01-20T00:00:00+00:00",
+            "gave_up": True,
+        }
+    )
+    details = {item["id"]: item for item in sessions}
+    shown = []
+
+    def deja(args, timeout=180):
+        assert args[0] == "show"
+        shown.append(args[1])
+        return {"session": details[args[1]]}
+
+    calls = []
+
+    def codex(_project, _prompt, schema, _iteration, **_kwargs):
+        calls.append(schema)
+        if len(calls) == 1:
+            return {
+                "create_patterns": [],
+                "update_patterns": [],
+                "update_index": "# Pattern index",
+                "append_log": "group sample maintained",
+            }
+        return {
+            "action": "no_action",
+            "name": "",
+            "skill_md": "",
+            "purpose_md": "",
+            "edits": [],
+            "reason": "insufficient evidence",
+        }
+
+    monkeypatch.setattr("wikiskill.core._deja_json", deja)
+    monkeypatch.setattr("wikiskill.core.call_codex", codex)
+
+    result = evolve_group("default", {"sessions": sessions}, quiet_minutes=0)
+
+    assert result == {
+        "group": "default",
+        "projects": 2,
+        "outcome": "no_action",
+        "sessions": 8,
+    }
+    assert len(calls) == 2
+    assert len(shown) == 8
+    manifest = json.loads(
+        (state_dir("default") / "raw/manifest.json").read_text()
+    )["sessions"]
+    assert {item["project"] for item in manifest.values()} == {"widget", "infra"}
+    assert "unrelated" not in manifest
 
 
 def test_reregistering_one_repo_can_update_group_settings(tmp_path):

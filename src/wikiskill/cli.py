@@ -11,9 +11,11 @@ from .core import (
     configure_group,
     context,
     evolve,
+    evolve_group,
     ingest,
     load_registry,
     project_for_path,
+    recent_listing,
     register,
     run,
     state_dir,
@@ -57,6 +59,7 @@ def parser() -> argparse.ArgumentParser:
     )
     nightly.add_argument("--since", default="36h")
     nightly.add_argument("--quiet-minutes", type=int, default=30)
+    nightly.add_argument("--warmup", action="store_true")
 
     for name in ("status", "context"):
         command = commands.add_parser(name)
@@ -132,13 +135,20 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "nightly":
-            run(["deja", "warmup"], timeout=1800)
+            if args.warmup:
+                run(["deja", "warmup"], timeout=1800)
+            projects = load_registry()
+            listing = recent_listing(args.since)
             failed = False
-            for project in load_registry().values():
+            for group_id in sorted({project.group_id for project in projects.values()}):
                 try:
                     print(
                         json.dumps(
-                            evolve(project, args.since, args.quiet_minutes),
+                            evolve_group(
+                                group_id,
+                                listing,
+                                args.quiet_minutes,
+                            ),
                             sort_keys=True,
                         )
                     )
@@ -149,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
                     json.JSONDecodeError,
                 ) as exc:
                     print(
-                        json.dumps({"project": project.project_id, "error": str(exc)})
+                        json.dumps({"group": group_id, "error": str(exc)})
                     )
                     failed = True
             return 1 if failed else 0

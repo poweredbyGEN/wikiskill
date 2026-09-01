@@ -150,17 +150,21 @@ wikiskill nightly --since 36h --quiet-minutes 30
 
 The command:
 
-1. warms the Deja index once;
-2. ingests completed, previously unseen sessions per registered repository;
-3. updates the group wiki;
-4. proposes at most one atomic skill change;
+1. reads recent Deja metadata once for every registered repository;
+2. samples up to five failed and three other completed sessions per group;
+3. updates each group wiki once;
+4. proposes at most one atomic skill change per group;
 5. runs every group validator;
 6. promotes the candidate only on strict aggregate improvement.
+
+Refresh a large Deja index in its own bounded job before WikiSkill runs. `nightly --warmup`
+is available for small installations that do not already schedule `deja index`.
 
 Cron example:
 
 ```cron
-17 3 * * * $HOME/.local/bin/wikiskill nightly >>$HOME/.local/state/wikiskill-nightly.log 2>&1
+15 3 * * * deja index >>$HOME/.local/state/deja-index.log 2>&1
+45 3 * * * $HOME/.local/bin/wikiskill nightly >>$HOME/.local/state/wikiskill-nightly.log 2>&1
 ```
 
 ## Load approved skills in coding agents

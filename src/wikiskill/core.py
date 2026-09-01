@@ -399,6 +399,44 @@ def _deja_json(args: list[str], timeout: int = 180) -> dict:
         raise WikiSkillError("deja returned invalid JSON") from exc
 
 
+def recent_listing(since: str) -> dict:
+    return _deja_json(
+        ["last", str(2**31 - 1), "--since", since, "--json"], timeout=600
+    )
+
+
+def _recent_details(
+    project: Project,
+    items: list[dict],
+    known: dict,
+    quiet_minutes: int,
+) -> list[dict]:
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=quiet_minutes)
+    sessions: list[dict] = []
+    for item in items:
+        previous = known.get(item.get("id"), {})
+        if (
+            previous.get("updated")
+            and item.get("updated")
+            and _parse_time(previous["updated"]) >= _parse_time(item["updated"])
+        ):
+            continue
+        if _parse_time(item["updated"]) > cutoff:
+            continue
+        command = ["show", item["id"]]
+        if item.get("harness"):
+            command += ["--harness", item["harness"]]
+        command += ["--json", "--limit", "1000000"]
+        detail = _deja_json(command).get("session", {})
+        if detail:
+            if detail.get("project") != project.deja_project:
+                raise WikiSkillError(
+                    f"Deja returned project {detail.get('project')!r} for scope {project.deja_project!r}"
+                )
+            sessions.append(detail)
+    return sessions
+
+
 def recent_sessions(
     project: Project, since: str, quiet_minutes: int = 30
 ) -> list[dict]:
@@ -417,28 +455,9 @@ def recent_sessions(
             "--json",
         ]
     )
-    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=quiet_minutes)
-    sessions: list[dict] = []
-    for item in listing.get("sessions", []):
-        previous = known.get(item.get("id"), {})
-        if (
-            previous.get("updated")
-            and item.get("updated")
-            and _parse_time(previous["updated"]) >= _parse_time(item["updated"])
-        ):
-            continue
-        if _parse_time(item["updated"]) > cutoff:
-            continue
-        detail = _deja_json(["show", item["id"], "--json", "--limit", "1000000"]).get(
-            "session", {}
-        )
-        if detail:
-            if detail.get("project") != project.deja_project:
-                raise WikiSkillError(
-                    f"Deja returned project {detail.get('project')!r} for scope {project.deja_project!r}"
-                )
-            sessions.append(detail)
-    return sessions
+    return _recent_details(
+        project, listing.get("sessions", []), known, quiet_minutes
+    )
 
 
 def _record_sessions(project: Project, sessions: list[dict]) -> list[dict]:
@@ -480,14 +499,14 @@ def ingest(project: Project, since: str = "36h", quiet_minutes: int = 30) -> lis
 
 
 def _pending_sessions(
-    project: Project, root: pathlib.Path, processed: set[str]
+    project: Project | None, root: pathlib.Path, processed: set[str]
 ) -> list[dict]:
     manifest = json.loads((root / "raw/manifest.json").read_text(encoding="utf-8"))
     pending = [
         (session_id, metadata)
         for session_id, metadata in manifest.get("sessions", {}).items()
         if metadata["sha256"] not in processed
-        and metadata.get("project") == project.deja_project
+        and (project is None or metadata.get("project") == project.deja_project)
     ]
     pending.sort(key=lambda item: item[1].get("updated", ""), reverse=True)
     failures = [item for item in pending if item[1].get("gave_up")][:5]
@@ -886,6 +905,12 @@ def _evolve_locked(
     state = json.loads(state_path.read_text(encoding="utf-8"))
     processed = set(state.get("processed_sessions", []))
     sessions = _pending_sessions(project, root, processed)
+    return _evolve_sessions_locked(project, root, sessions)
+
+
+def _evolve_sessions_locked(
+    project: Project, root: pathlib.Path, sessions: list[dict]
+) -> dict:
     if not sessions:
         return {
             "project": project.project_id,
@@ -893,6 +918,8 @@ def _evolve_locked(
             "outcome": "unchanged",
             "sessions": 0,
         }
+    state_path = root / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
     stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     iteration = root / "iterations" / (stamp + "-" + uuid.uuid4().hex[:8])
     iteration.mkdir(parents=True, mode=0o700)
@@ -962,6 +989,90 @@ def evolve(project: Project, since: str = "36h", quiet_minutes: int = 30) -> dic
                 f"registered root identity changed: expected {current.project_id}, found {actual_id}"
             )
         return _evolve_locked(current, root, since, quiet_minutes)
+
+
+def evolve_group(
+    group_id: str,
+    listing: dict,
+    quiet_minutes: int = 30,
+) -> dict:
+    members = sorted(
+        (
+            project
+            for project in load_registry().values()
+            if project.group_id == group_id
+        ),
+        key=lambda project: project.project_id,
+    )
+    if not members:
+        raise WikiSkillError(f"group {group_id!r} has no registered repositories")
+    root = initialize(members[0])
+    with _group_lock(root):
+        members = sorted(
+            (
+                project
+                for project in load_registry().values()
+                if project.group_id == group_id
+            ),
+            key=lambda project: project.project_id,
+        )
+        by_scope = {project.deja_project: project for project in members}
+        for project in members:
+            actual_root = canonical_root(project.root)
+            actual_id = identity(actual_root)
+            if actual_id != project.project_id:
+                raise WikiSkillError(
+                    f"registered root identity changed: expected {project.project_id}, found {actual_id}"
+                )
+
+        manifest = json.loads(
+            (root / "raw/manifest.json").read_text(encoding="utf-8")
+        )
+        known = manifest.get("sessions", {})
+        cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=quiet_minutes)
+        eligible = [
+            item
+            for item in listing.get("sessions", [])
+            if item.get("project") in by_scope
+            and item.get("id")
+            and item.get("updated")
+            and not (
+                known.get(item["id"], {}).get("updated")
+                and _parse_time(known[item["id"]]["updated"])
+                >= _parse_time(item["updated"])
+            )
+            and _parse_time(item["updated"]) <= cutoff
+        ]
+        eligible.sort(key=lambda item: item["updated"], reverse=True)
+        selected = [item for item in eligible if item.get("gave_up")][:5]
+        selected += [item for item in eligible if not item.get("gave_up")][:3]
+        for project in members:
+            items = [
+                item
+                for item in selected
+                if item.get("project") == project.deja_project
+            ]
+            if items:
+                _record_sessions(
+                    project,
+                    _recent_details(project, items, known, quiet_minutes),
+                )
+
+        state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+        sessions = _pending_sessions(
+            None, root, set(state.get("processed_sessions", []))
+        )
+        if not sessions:
+            return {
+                "group": group_id,
+                "projects": len(members),
+                "outcome": "unchanged",
+                "sessions": 0,
+            }
+        result = _evolve_sessions_locked(members[0], root, sessions)
+        result.pop("project", None)
+        result["projects"] = len(members)
+        return result
 
 
 def context(project: Project) -> str:
